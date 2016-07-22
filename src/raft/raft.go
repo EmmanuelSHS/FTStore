@@ -174,6 +174,20 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
 
+    print("voter ")
+    print(rf.me)
+    print("\n")
+    print("currentTerm ")
+    print(rf.currentTerm)
+    print("\n")
+    print("len log ")
+    print(len(rf.log))
+    print("\n")
+    print("args candidate ")
+    print(args.candidateId)
+    print("args term ")
+    print(args.term)
+    print("\n")
     // from 5.1
     if (rf.currentTerm > args.term) {
         reply.voteGranted = false
@@ -211,6 +225,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
     reply.voteGranted = granted
     reply.term = rf.currentTerm
+
+    //print(reply.term)
+    //print(reply.voteGranted)
+    //print("\n")
+    return
 }
 
 //
@@ -387,8 +406,14 @@ func (rf *Raft) Kill() {
 func (rf *Raft) Election() {
     rf.mu.Lock()
 
+    print("candidate ")
+    print(rf.me)
+    print("\n")
     // increase cur tearm
     rf.currentTerm++
+    print("votee term")
+    print(rf.currentTerm)
+    print("\n")
     rf.state = Candidate // change state
     rf.votedFor = rf.me
 
@@ -398,21 +423,26 @@ func (rf *Raft) Election() {
     voteChan := make(chan bool, npeers)
 
     rf.lastReceived = time.Now().UnixNano()
-    args := RequestVoteArgs{term: rf.currentTerm, candidateId: rf.votedFor, 
-                            lastLogIndex: lastIdx(rf.log), lastLogTerm: lastTerm(rf.log)}
+    args := RequestVoteArgs{term: rf.currentTerm, candidateId: rf.votedFor, lastLogIndex: lastIdx(rf.log), lastLogTerm: lastTerm(rf.log)}
 
     rf.mu.Unlock()
 
     // send RequestVoteArgs
     for i := 0; i < npeers; i++ {
         if i != rf.me {
-            go func(peer int){
+            go func(peer int, args RequestVoteArgs){
+                print("send to ")
+                print(peer)
+                print("\n")
                 reply := RequestVoteReply{}
 
                 //sending & receving only from this peer
                 ch := make(chan bool, 1)
 
                 go func() {
+                    print("votee send vote args term ")
+                    print(args.term)
+                    print("\n")
                     ch <- rf.sendRequestVote(peer, args, &reply)
                 }()
 
@@ -430,7 +460,7 @@ func (rf *Raft) Election() {
                 } else {
                     voteChan <- false
                 }
-            }(i)
+            }(i, args)
         }
     }
 
@@ -443,7 +473,8 @@ func (rf *Raft) Election() {
     }
 
     // count votes
-    for v := range voteChan {
+    for i := 0; i < npeers - 1; i++ {
+        v := <-voteChan
         if v {
             nvotes++
         }
