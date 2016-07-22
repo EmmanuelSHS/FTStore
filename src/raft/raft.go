@@ -51,7 +51,7 @@ type ApplyMsg struct {
 //
 type LogEntry struct {
     Index           int
-    State           interface{}
+    Command           interface{}
     Term            int
 }
 
@@ -85,6 +85,8 @@ type Raft struct {
 
     // other necessary vars
     lastReceived    int64 // last time receive rpc from others
+
+    applyCh         chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -236,7 +238,7 @@ type AppendEntriesArgs struct {
     leaderId        int
     prevLogIndex    int
     prevLogTerm     int
-    entries         []int
+    entries         []LogEntry
     leaderCommit    int // leader commit index
 }
 
@@ -265,7 +267,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
     baseIdx := rf.log[0].Index // real idx starts not at 0
     // 5.3 
-    if args.prevLogIndex > lastIdx(rf.log) || (args.prevLogIndex >= baseIdx && rf.log[args.prevLogIndex - baseIdx] != args.prevLogTerm) {
+    if args.prevLogIndex > lastIdx(rf.log) || (args.prevLogIndex >= baseIdx && rf.log[args.prevLogIndex - baseIdx].Term != args.prevLogTerm) {
         rf.persist()
         reply.success = false
         reply.term = rf.currentTerm
@@ -277,13 +279,37 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
     // dump / save log to persist store each time commit
     if args.prevLogIndex < baseIdx {
         rf.log = rf.log[0:1]
+        for i := 0; i < len(args.entries); i++ {
+            if (args.entries[i].Index > rf.log[0].Index) {
+                rf.log = append(rf.log, args.entries[i])
+            }
+        }
     } else {
         rf.log = rf.log[0:(args.prevLogIndex - baseIdx + 1)]
-        rf.log = append(rf.log, args.entries)
+        for i := 0; i < len(args.entries); i++ {
+            rf.log = append(rf.log, args.entries[i])
+        }
     }
 
+    reply.success = true
 
+    // update commitIndex and ApplyMsg
+    if args.leaderCommit > rf.commitIndex {
+        rf.commitIndex = args.leaderCommit
+        
+        if lastIdx(rf.log) < rf.commitIndex {
+            rf.commitIndex = lastIdx(rf.log)
+        }
 
+        for i := rf.lastApplied + 1; i < rf.commitIndex + 1; i++ {
+            if i - baseIdx > 0 {
+                msg := ApplyMsg{Index: i, Command: rf.log[i - baseIdx].Command}
+                rf.applyCh <-msg
+            }
+        }
+        rf.lastApplied = rf.commitIndex
+    }
+    rf.persist()
 }
 
 
@@ -353,13 +379,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
     // Your code here, if desired.
-}
-
-//
-// random time generator between duration
-//
-func randTime(min int, max int) int64 {
-    return int64((max - min) * rand.Int() + min)
 }
 
 //
@@ -477,6 +496,7 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 
     rf.state = Follower
     rf.lastReceived = time.Now().UnixNano()
+    rf.applyCh = applyCh
 
     // initialize from state persisted before a crash
     rf.readPersist(persister.ReadRaftState())
@@ -484,7 +504,7 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
     // go routine for start voting, candidate state
     go func() {
         for {
-            electionTimeout := randTime(Timeout, 2 * Timeout)
+            electionTimeout := int64(1e6 * (Timeout + rand.Intn(Timeout)))
             time.Sleep(time.Duration(electionTimeout))
 
             now := time.Now().UnixNano()
