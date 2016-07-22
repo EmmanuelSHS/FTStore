@@ -2,6 +2,10 @@ package mapreduce
 
 import (
 	"hash/fnv"
+        "io/ioutil"
+        "os"
+        "encoding/json"
+        "fmt"
 )
 
 // doMap does the job of a map worker: it reads one of the input files
@@ -14,7 +18,6 @@ func doMap(
 	nReduce int, // the number of reduce task that will be run ("R" in the paper)
 	mapF func(file string, contents string) []KeyValue,
 ) {
-	// TODO:
 	// You will need to write this function.
 	// You can find the filename for this map task's input to reduce task number
 	// r using reduceName(jobName, mapTaskNumber, r). The ihash function (given
@@ -40,6 +43,37 @@ func doMap(
 	//     err := enc.Encode(&kv)
 	//
 	// Remember to close the file after you have written all the values!
+        f,err := ioutil.ReadFile(inFile)
+        errCheck(err)
+
+        medResults := mapF(inFile, string(f))
+
+        medFiles := make(map[string]*os.File)
+        medJSON := make(map[string]*json.Encoder)
+        for i := 0; i < nReduce; i++ {
+                fileName := reduceName(jobName, mapTaskNumber, i)
+                medFile,err := os.Create(fileName)
+                errCheck(err)
+                medFiles[fileName] = medFile
+                medJSON[fileName] = json.NewEncoder(medFile)
+        }
+
+        for k,_ := range(medFiles) {
+                fmt.Printf("%s", k)
+        }
+        for i := 0; i < len(medResults); i++ {
+                kv := medResults[i]
+                nr := int(ihash(kv.Key) % uint32(nReduce))
+                fname := reduceName(jobName, mapTaskNumber, nr)
+                err := medJSON[fname].Encode(&kv)
+                errCheck(err)
+        }
+
+        // close all files
+        for _,f := range(medFiles) {
+                f.Close()
+        }
+
 }
 
 func ihash(s string) uint32 {
