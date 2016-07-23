@@ -87,6 +87,7 @@ type Raft struct {
     lastReceived    int64 // last time receive rpc from others
 
     applyCh         chan ApplyMsg
+    done            chan bool
 }
 
 // return currentTerm and whether this server
@@ -174,22 +175,23 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
 
-    //print("voter ")
-    //print(rf.me)
-    //print("\n")
-    //print("currentTerm ")
-    //print(rf.currentTerm)
-    //print("\n")
-    //print("len log ")
-    //print(len(rf.log))
-    //print("\n")
-    //print("args candidate ")
-    //print(args.CandidateId)
-    //print("args term ")
-    //print(args.Term)
-    //print("\n")
+    print("voter ")
+    print(rf.me)
+    print("\n")
+    print("currentTerm ")
+    print(rf.currentTerm)
+    print("\n")
+    print("len log ")
+    print(len(rf.log))
+    print("\n")
+    print("args candidate ")
+    print(args.CandidateId)
+    print("args term ")
+    print(args.Term)
+    print("\n")
     // from 5.1
     if (rf.currentTerm > args.Term) {
+        print("in direct return")
         reply.VoteGranted = false
         reply.Term = rf.currentTerm
         return
@@ -197,23 +199,28 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
     // state have to change if first condition not satified
     if (rf.currentTerm < args.Term) {
+        print("in args term higher\n")
         rf.currentTerm = args.Term
         rf.state = Follower
     }
 
     uptodate := false
     // from 5.4
-    lt := lastTerm(rf.log)
-    if (lt < args.LastLogTerm) {
+    // but adjust since "as uptodate as"
+    if (lastTerm(rf.log) <= args.LastLogTerm) {
         uptodate = true
     }
-    if (lt == args.LastLogTerm && lastIdx(rf.log) < args.LastLogIndex) {
+    if (lastTerm(rf.log) == args.LastLogTerm && lastIdx(rf.log) <= args.LastLogIndex) {
         uptodate = true
     }
+    print("update ")
+    print(uptodate)
+    print("\n")
 
     // 5.2 based on 5.4 uptodate flag
     granted := false
     if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && uptodate {
+        print("in vote granted\n")
         granted = true
         rf.currentTerm = args.Term // rf would not have higher term than master if granted vote
         rf.votedFor = args.CandidateId
@@ -226,9 +233,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
     reply.VoteGranted = granted
     reply.Term = rf.currentTerm
 
-    //print(reply.term)
-    //print(reply.voteGranted)
-    //print("\n")
+    print("relpy ")
+    print(reply.Term)
+    print(" ")
+    print(reply.VoteGranted)
+    print("\n")
     return
 }
 
@@ -342,6 +351,10 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 //
 func (rf *Raft) sendHeartbeats() {
     for {
+        if rf.shutdown() {
+            return 
+        }
+
         // make empty AppendEntries
         rf.mu.Lock()
         // guard
@@ -388,13 +401,13 @@ func (rf *Raft) sendHeartbeats() {
                 reply := AppendEntriesReply{}
 
                 // fill rest args
-                args.PrevLogIndex = rf.nextIndex[peer].Index - 1
-                args.PrevLogTerm = rf.nextIndex[args.PrevLogIndex - baseIdx].Term
+                args.PrevLogIndex = rf.nextIndex[i] - 1
+                args.PrevLogTerm = rf.log[args.PrevLogIndex - baseIdx].Term
                 args.Entries = make([]LogEntry, len(rf.log[rf.nextIndex[i] - baseIdx:]))
                 copy(args.Entries, rf.log[rf.nextIndex[i] - baseIdx:])
 
                 go func(peer int) {
-                    ok := rf.sendAppendEntries(peer, args, reply)
+                    ok := rf.sendAppendEntries(peer, args, &reply)
 
                     if !ok {
                         return
@@ -466,6 +479,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
     // Your code here, if desired.
+    close(rf.done)
+}
+
+//
+func (rf *Raft) shutdown() bool {
+    select {
+        case <-rf.done:
+            return true
+        default:
+            return false
+    }
 }
 
 //
@@ -491,7 +515,7 @@ func (rf *Raft) Election() {
     voteChan := make(chan bool, npeers)
 
     rf.lastReceived = time.Now().UnixNano()
-    args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.votedFor, LastLogIndex: lastIdx(rf.log), LastLogTerm: lastTerm(rf.log)}
+    args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastIdx(rf.log), LastLogTerm: lastTerm(rf.log)}
 
     rf.mu.Unlock()
 
@@ -518,19 +542,48 @@ func (rf *Raft) Election() {
                 // collect vote from this peer
                 select {
                 case ok = <-ch:
-                case <- time.After(Timeout):
+                // tunning correct wait-for time is necessary
+                case <- time.After(100 * time.Millisecond):
                     ok = false
                 }
 
+                print("peer reply returned ")
+                print(peer)
+                print(" ok ")
+                print(ok)
+                print(" vote ")
+                print(reply.VoteGranted)
+                print("\n")
                 if ok && reply.VoteGranted {
                     //nvotes++ not possible, thread unsafe
+                    print("int true chan\n")
                     voteChan <- true
                 } else {
+                    print("int false chan\n")
                     voteChan <- false
                 }
+                print("reply sent back ")
+                print(peer)
+                print(reply.Term)
+                print(reply.VoteGranted)
+                print("\n")
             }(i)
         }
     }
+
+    // count votes
+    for i := 0; i < npeers - 1; i++ {
+        v := <-voteChan
+        print("from vote chan ")
+        print(v)
+        print("\n")
+        if v {
+            nvotes++
+        }
+    }
+    print("the votes collected as ")
+    print(nvotes)
+    print("\n")
 
     rf.mu.Lock()
     defer rf.mu.Lock()
@@ -540,16 +593,9 @@ func (rf *Raft) Election() {
         return
     }
 
-    // count votes
-    for i := 0; i < npeers - 1; i++ {
-        v := <-voteChan
-        if v {
-            nvotes++
-        }
-    }
-
     if (nvotes >= npeers / 2 + 1) {
         rf.state = Leader
+        print("becomes leader rrrrrr \n")
 
         li := lastIdx(rf.log)
         for i := 0; i < npeers; i++ {
@@ -560,6 +606,7 @@ func (rf *Raft) Election() {
             }
         }
         // heartbeats to all
+        print("sending heartbeatsssssssssssss\n")
         go rf.sendHeartbeats()
     }
 }
@@ -595,7 +642,9 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 
     rf.state = Follower
     rf.lastReceived = time.Now().UnixNano()
+
     rf.applyCh = applyCh
+    rf.done = make(chan bool)
 
     // initialize from state persisted before a crash
     rf.readPersist(persister.ReadRaftState())
@@ -603,6 +652,10 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
     // go routine for start voting, candidate state
     go func() {
         for {
+            if rf.shutdown() {
+                return
+            }
+
             electionTimeout := int64(1e6 * (Timeout + rand.Intn(Timeout)))
             time.Sleep(time.Duration(electionTimeout))
 
