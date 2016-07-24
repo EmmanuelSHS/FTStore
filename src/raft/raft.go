@@ -313,7 +313,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
     // write 
     // conflict solution
     // dump / save log to persist store each time commit
-    rf.log = rf.log[0:args.PrevLogIndex+1]
+    rf.log = rf.log[0:(args.PrevLogIndex+1)]
 
     for i := 0; i < len(args.Entries); i++ {
         if args.Entries[i].Index > lastIdx(rf.log) {
@@ -354,7 +354,7 @@ func (rf *Raft) SendHeartbeats() {
         isLeader := rf.state == Leader
         rf.mu.Unlock()
 
-        if isLeader {
+        if !isLeader {
             return
         }
 
@@ -493,7 +493,7 @@ func (rf *Raft) Election() {
 
     // default self 1
     nvotes := 1
-    voteChan := make(chan bool, len(rf.peers))
+    voteChan := make(chan RequestVoteReply, len(rf.peers))
 
 
 
@@ -505,18 +505,19 @@ func (rf *Raft) Election() {
                 reply := RequestVoteReply{}
 
                 ok := rf.sendRequestVote(peer, args, &reply)
-                if ok {
-                    voteChan <- true
-                } else {
-                    voteChan <- false
+                if !ok {
+                    reply.VoteGranted = false
                 }
+
+                voteChan <-reply
+
             }(i)
         }
     }
 
     for i := 0; i < len(rf.peers)/2; i++ {
         v := <-voteChan
-        if v {
+        if v.VoteGranted {
             nvotes++
         }
     }
