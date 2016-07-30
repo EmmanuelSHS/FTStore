@@ -34,6 +34,7 @@ const (
 
 const (
     Heartbeat = 100 * time.Millisecond
+    Timeout = 150
 )
 
 //
@@ -73,8 +74,8 @@ type Raft struct {
     state           int // role of rf
 
     currentTerm     int // current term of given raft server
-    votedForCandidate        int // index of candidate, could be nil (== -1 in our context)
-    votedForTerm     int // term from candidate
+    votedForCandidate       int // index of candidate, could be nil (== -1 in our context)
+    votedForTerm     int // term from candidate, necessary since votedForTerm != currentTerm
     log             []LogEntry // log storage for index, state machine already stored elsewhere
 
     // volatile states for all servers
@@ -178,7 +179,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
     // only if raft serve has no leader || has leader that calls && candidate has most up to date log would grant true
     // from 5.1
     if (rf.currentTerm > args.Term) {
-        //print("in direct return")
         reply.VoteGranted = false
         reply.Term = rf.currentTerm
         return
@@ -189,7 +189,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
     // state have to change if first condition not satified
     if (rf.currentTerm < args.Term) {
-        //print("in args term higher\n")
         rf.currentTerm = args.Term
         rf.state = Follower
     }
@@ -203,9 +202,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
     if (lastTerm(rf.log) == args.LastLogTerm && lastIdx(rf.log) <= args.LastLogIndex) {
         uptodate = true
     }
-    //print("update ")
-    //print(uptodate)
-    //print("\n")
 
     // 5.2 based on 5.4 uptodate flag
     granted := false
@@ -216,7 +212,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
     if granted {
         rf.votedForTerm = args.Term // rf would not have higher term than master if granted vote
         rf.votedForCandidate = args.CandidateId
-        //rf.lastReceived = time.Now().UnixNano()
+        rf.lastReceived = time.Now().UnixNano()
     }
 
     // write to stable store before respond
@@ -498,8 +494,6 @@ func (rf *Raft) Election() {
     nvotes := 1
     voteChan := make(chan RequestVoteReply, len(rf.peers))
 
-
-
     // send RequestVoteArgs
     for i := 0; i < len(rf.peers); i++ {
         if i != rf.me {
@@ -592,7 +586,7 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
     go func() {
         for {
 
-            electionTimeout := int64(1000000 * (150 + rand.Intn(150)))
+            electionTimeout := int64(1e6 * (Timeout + rand.Intn(Timeout)))
             time.Sleep(time.Duration(electionTimeout))
 
             now := time.Now().UnixNano()
