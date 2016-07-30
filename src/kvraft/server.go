@@ -22,6 +22,8 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+    Oprand string
+    Args    interface{}
 }
 
 type RaftKV struct {
@@ -33,15 +35,43 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+    kvstore map[string]string
+    cond *sync.Cond // linear serializability, Signal release one earliest request & idx satisfy requirement, like a queue
 }
 
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+    kv.mu.Lock()
+    defer kv.mu.Unlock()
+
+    _, isLeader := kv.rf.GetState()
+    if isLeader {
+        reply.WrongLeader = false
+        reply.Value = kv.kvstore[args.Key]
+        if reply.Value == "" {
+            reply.Err = ErrNoKey
+        } else {
+            reply.Err = OK
+        }
+    } else {
+        reply.WrongLeader = true
+    }
+    return
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+    kv.mu.Lock()
+    defer kv.mu.Unlock()
+
+    _, isLeader = kv.rf.GetState()
+    if isLeader {
+        
+    } else {
+        reply.WrongLeader = true
+    }
+    return
 }
 
 //
@@ -67,6 +97,8 @@ func (kv *RaftKV) Kill() {
 // you don't need to snapshot.
 // StartKVServer() must return quickly, so it should start goroutines
 // for any long-running work.
+//
+// One server contains a serial of k-v pairs as stored locally
 //
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *RaftKV {
 	// call gob.Register on structures you want

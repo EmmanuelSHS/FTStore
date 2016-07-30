@@ -14,6 +14,9 @@ type PutAppendArgs struct {
 	Value string
 	Op    string // "Put" or "Append"
 	// You'll have to add definitions here.
+    Cid int64 // client id
+    Sid int // current serial number
+
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
@@ -26,6 +29,8 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+    Cid int64 // client id
+    Sid int // current serial number
 }
 
 type GetReply struct {

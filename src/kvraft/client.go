@@ -5,9 +5,16 @@ import "crypto/rand"
 import "math/big"
 
 
+const (
+    Wait = 100 * time.Millisecond
+)
+
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+    sid int // serial number
+    id int64 // clerk id
+
 }
 
 func nrand() int64 {
@@ -21,6 +28,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+    sid := 0
+    id := nrand()
 	return ck
 }
 
@@ -39,7 +48,26 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	return ""
+    args := &GetArgs{Key: key, Cid: ck.id, Sid: ck.sid}
+    ck.sid++
+
+    // outer for to make sure iteration till leader elected
+    for {
+        for _, server := range ck.servers {
+            reply := &GetReply{}
+            ok := server.Call("RaftKV.Get", args, reply)
+
+            if !reply.WrongLeader && ok {
+                if reply.Err == ErrNoKey {
+                    reply.Value = ""
+                }
+
+                return reply.Value
+            }
+        }
+
+        time.sleep(Wait)
+    }
 }
 
 //
@@ -54,6 +82,20 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+    args := &PutAppendArgs{Key: key, Value: value, Op: op, Cid: ck.id, Sid: ck.sid}
+    ck.sid++
+
+    for {
+        for _, server := range ck.servers {
+            reply := &PutAppendReply{}
+            ok := server.Call("RaftKV.PutAppend", &args, &reply)
+
+            if !reply.WrongLeader && ok {
+                return
+            }
+        }
+        time.sleep(Wait)
+    }
 }
 
 func (ck *Clerk) Put(key string, value string) {
