@@ -6,7 +6,10 @@ import (
 	"log"
 	"raft"
 	"sync"
+    "time"
 )
+
+const Timeout = 10 * time.Millisecond
 
 const Debug = 0
 
@@ -37,6 +40,63 @@ type RaftKV struct {
 	// Your definitions here.
     kvstore map[string]string
     cond *sync.Cond // linear serializability, Signal release one earliest request & idx satisfy requirement, like a queue
+    progress int // current idx
+    isLeader bool
+    lastOp Op
+    history map[int64]int
+}
+
+
+func (kv *RaftKV) DuplicateReq(cid int64, sid int) bool {
+    value, ok := kv.history[cid]
+    if !ok {
+        return false
+    } else {
+        // return true
+        return value >= sid
+    }
+}
+
+
+func (kv *RaftKV) ReturnValue(key string, value string, op string) string {
+    if op == "Put" {
+        return value
+    } else {
+        return kv.kvstore[key] + value
+    }
+}
+
+func (kv *RaftKV) Apply(args Op) {
+    if args.Oprand == "Get" {
+        // record history
+        getArgs := args.Args.(GetArgs)
+        kv.history[getArgs.Cid] = getArgs.Sid
+    } else {
+        putAppendArgs := args.Args.(PutAppendArgs)
+        kv.history[putAppendArgs.Cid] = putAppendArgs.Sid
+        kv.kvstore[putAppendArgs.Key] = kv.ReturnValue(putAppendArgs.Key, putAppendArgs.Value, args.Oprand)
+    }
+}
+
+
+func (kv *RaftKV) Run(value Op, cid int64, sid int) bool {
+    // wait till idx arrives at appropriate time
+    idx, _, isLeader := kv.rf.Start(value)
+
+    if isLeader {
+        kv.cond.L.Lock()
+        // corresponding to two Signal in make go func
+        for kv.progress < idx && kv.isLeader {
+            kv.cond.Wait()
+        }
+        kv.cond.L.Unlock()
+    }
+
+    if !kv.isLeader || kv.lastOp != value {
+        isLeader = false
+    }
+
+    return isLeader
 }
 
 
@@ -45,17 +105,20 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
     kv.mu.Lock()
     defer kv.mu.Unlock()
 
-    _, isLeader := kv.rf.GetState()
-    if isLeader {
-        reply.WrongLeader = false
-        reply.Value = kv.kvstore[args.Key]
-        if reply.Value == "" {
-            reply.Err = ErrNoKey
-        } else {
-            reply.Err = OK
-        }
-    } else {
+    value := Op{Oprand: "Get", Args: *args}
+    ok := kv.Run(value, args.Cid, args.Sid)
+
+    if !ok {
         reply.WrongLeader = true
+    } else {
+        reply.WrongLeader = false
+        v, exist := kv.kvstore[args.Key]
+        if exist {
+            reply.Err = OK
+            reply.Value = v
+        } else {
+            reply.Err = ErrNoKey
+        }
     }
     return
 }
@@ -65,11 +128,14 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
     kv.mu.Lock()
     defer kv.mu.Unlock()
 
-    _, isLeader = kv.rf.GetState()
-    if isLeader {
-        
-    } else {
+    value := Op{Oprand: args.Op, Args: *args}
+    ok := kv.Run(value, args.Cid, args.Sid)
+
+    if !ok {
         reply.WrongLeader = true
+    } else {
+        reply.WrongLeader = false
+        reply.Err = OK
     }
     return
 }
@@ -104,6 +170,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call gob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	gob.Register(Op{})
+    gob.Register(PutAppendArgs{})
+    gob.Register(GetArgs{})
 
 	kv := new(RaftKV)
 	kv.me = me
@@ -111,9 +179,55 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// Your initialization code here.
 
+    kv.history = make(map[int64]int)
+    kv.kvstore = make(map[string]string)
+    kv.progress = 0
+
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+    kv.cond = &sync.Cond{L: &sync.Mutex{}}
 
+    go func() {
+        for {
+            // retrieve msg from channel
+            applyMsg := <-kv.applyCh
+            op := applyMsg.Command.(Op)
+
+            var cid int64
+            var sid int
+            if op.Oprand == "Get" {
+                getArgs := op.Args.(GetArgs)
+                cid = getArgs.Cid
+                sid = getArgs.Sid
+            } else {
+                putAppendArgs := op.Args.(PutAppendArgs)
+                cid = putAppendArgs.Cid
+                sid = putAppendArgs.Sid
+            }
+
+            // if request sent before, do not have to do again
+            if !kv.DuplicateReq(cid, sid) {
+                kv.Apply(op)
+            }
+
+            kv.cond.L.Lock()
+            kv.progress = applyMsg.Index
+            kv.lastOp = op
+            kv.cond.L.Unlock()
+            kv.cond.Signal()
+        }
+    }()
+
+    go func() {
+        for {
+            _, isLeader := kv.rf.GetState()
+            kv.cond.L.Lock()
+            kv.isLeader = isLeader
+            kv.cond.L.Unlock()
+            kv.cond.Signal()
+            time.Sleep(Timeout)
+        }
+    }()
 
 	return kv
 }

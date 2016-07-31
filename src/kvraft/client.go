@@ -3,6 +3,7 @@ package raftkv
 import "labrpc"
 import "crypto/rand"
 import "math/big"
+import "time"
 
 
 const (
@@ -28,8 +29,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
-    sid := 0
-    id := nrand()
+    ck.sid = 0
+    ck.id = nrand()
 	return ck
 }
 
@@ -54,8 +55,8 @@ func (ck *Clerk) Get(key string) string {
     // outer for to make sure iteration till leader elected
     for {
         for _, server := range ck.servers {
-            reply := &GetReply{}
-            ok := server.Call("RaftKV.Get", args, reply)
+            reply := GetReply{}
+            ok := server.Call("RaftKV.Get", args, &reply)
 
             if !reply.WrongLeader && ok {
                 if reply.Err == ErrNoKey {
@@ -66,7 +67,7 @@ func (ck *Clerk) Get(key string) string {
             }
         }
 
-        time.sleep(Wait)
+        time.Sleep(Wait)
     }
 }
 
@@ -87,14 +88,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
     for {
         for _, server := range ck.servers {
-            reply := &PutAppendReply{}
-            ok := server.Call("RaftKV.PutAppend", &args, &reply)
+            reply := PutAppendReply{}
+            ok := server.Call("RaftKV.PutAppend", args, &reply)
 
             if !reply.WrongLeader && ok {
                 return
             }
         }
-        time.sleep(Wait)
+        time.Sleep(Wait)
     }
 }
 
