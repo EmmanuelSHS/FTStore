@@ -125,8 +125,6 @@ func (kv *RaftKV) Run(value Op) (bool, DBEntry) {
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-    kv.mu.Lock()
-    defer kv.mu.Unlock()
 
     value := Op{Oprand: "Get", Args: *args}
     ok, entry := kv.Run(value)
@@ -147,8 +145,6 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-    kv.mu.Lock()
-    defer kv.mu.Unlock()
 
     value := Op{Oprand: args.Op, Args: *args}
     ok, _ := kv.Run(value)
