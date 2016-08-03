@@ -7,9 +7,8 @@ import (
 	"raft"
 	"sync"
     "time"
+    "bytes"
 )
-
-const Timeout = 10 * time.Millisecond
 
 const Debug = 0
 
@@ -29,6 +28,12 @@ type Op struct {
     Args    interface{}
 }
 
+type DBEntry struct {
+    Command Op
+    Exist bool
+    Value string
+}
+
 type RaftKV struct {
 	mu      sync.Mutex
 	me      int
@@ -39,11 +44,9 @@ type RaftKV struct {
 
 	// Your definitions here.
     kvstore map[string]string
-    cond *sync.Cond // linear serializability, Signal release one earliest request & idx satisfy requirement, like a queue
-    progress int // current idx
-    isLeader bool
-    lastOp Op
     history map[int64]int
+    result map[int]chan DBEntry
+    done chan bool
 }
 
 
@@ -66,6 +69,18 @@ func (kv *RaftKV) ReturnValue(key string, value string, op string) string {
     }
 }
 
+func (kv *RaftKV) CheckSnapshot(idx int) {
+    if kv.maxraftstate != -1 && float64(kv.rf.GetPersistSize()) > float64(kv.maxraftstate) * 0.8 {
+        w := new(bytes.Buffer)
+        e := gob.NewEncoder(w)
+        e.Encode(kv.kvstore)
+        e.Encode(kv.history)
+        data := w.Bytes()
+
+        go kv.rf.StartSnapshot(data, idx)
+    }
+}
+
 func (kv *RaftKV) Apply(args Op) {
     if args.Oprand == "Get" {
         // record history
@@ -79,24 +94,32 @@ func (kv *RaftKV) Apply(args Op) {
 }
 
 
-func (kv *RaftKV) Run(value Op, cid int64, sid int) bool {
+func (kv *RaftKV) Run(value Op) (bool, DBEntry) {
     // wait till idx arrives at appropriate time
+    var entry DBEntry
     idx, _, isLeader := kv.rf.Start(value)
 
-    if isLeader {
-        kv.cond.L.Lock()
-        // corresponding to two Signal in make go func
-        for kv.progress < idx && kv.isLeader {
-            kv.cond.Wait()
-        }
-        kv.cond.L.Unlock()
+    if !isLeader {
+        return false, entry
     }
 
-    if !kv.isLeader || kv.lastOp != value {
-        isLeader = false
+    kv.mu.Lock()
+
+    ch, exist := kv.result[idx]
+
+    if !exist {
+        kv.result[idx] = make(chan DBEntry, 1)
+        ch = kv.result[idx]
     }
 
-    return isLeader
+    kv.mu.Unlock()
+
+    select {
+    case entry = <-ch:
+        return entry.Command == value, entry
+    case <-time.After(1000 * time.Millisecond):
+        return false, entry
+    }
 }
 
 
@@ -106,16 +129,15 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
     defer kv.mu.Unlock()
 
     value := Op{Oprand: "Get", Args: *args}
-    ok := kv.Run(value, args.Cid, args.Sid)
+    ok, entry := kv.Run(value)
 
     if !ok {
         reply.WrongLeader = true
     } else {
         reply.WrongLeader = false
-        v, exist := kv.kvstore[args.Key]
-        if exist {
+        if entry.Exist {
             reply.Err = OK
-            reply.Value = v
+            reply.Value = entry.Value
         } else {
             reply.Err = ErrNoKey
         }
@@ -129,7 +151,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
     defer kv.mu.Unlock()
 
     value := Op{Oprand: args.Op, Args: *args}
-    ok := kv.Run(value, args.Cid, args.Sid)
+    ok, _ := kv.Run(value)
 
     if !ok {
         reply.WrongLeader = true
@@ -149,6 +171,15 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *RaftKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+}
+
+func (kv *RaftKV) shutdown() bool {
+    select {
+    case <-kv.done:
+        return true
+    default:
+        return false
+    }
 }
 
 //
@@ -178,56 +209,93 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// Your initialization code here.
+    kv.done = make(chan bool)
 
     kv.history = make(map[int64]int)
     kv.kvstore = make(map[string]string)
-    kv.progress = 0
+    kv.result = make(map[int]chan DBEntry)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-    kv.cond = &sync.Cond{L: &sync.Mutex{}}
 
     go func() {
         for {
+
+            if kv.shutdown() {
+                return
+            }
             // retrieve msg from channel
             applyMsg := <-kv.applyCh
-            op := applyMsg.Command.(Op)
 
-            var cid int64
-            var sid int
-            if op.Oprand == "Get" {
-                getArgs := op.Args.(GetArgs)
-                cid = getArgs.Cid
-                sid = getArgs.Sid
-            } else {
-                putAppendArgs := op.Args.(PutAppendArgs)
-                cid = putAppendArgs.Cid
-                sid = putAppendArgs.Sid
-            }
+            if applyMsg.UseSnapshot {
+                var LastIncludedIndex int
+                var LastIncludedTerm int
 
-            // if request sent before, do not have to do again
-            if !kv.DuplicateReq(cid, sid) {
-                kv.Apply(op)
-            }
+				r := bytes.NewBuffer(applyMsg.Snapshot)
+				d := gob.NewDecoder(r)
 
-            kv.cond.L.Lock()
-            kv.progress = applyMsg.Index
-            kv.lastOp = op
-            kv.cond.L.Unlock()
-            kv.cond.Signal()
-        }
-    }()
+				kv.mu.Lock()
+				d.Decode(&LastIncludedIndex)
+				d.Decode(&LastIncludedTerm)
+				kv.kvstore = make(map[string]string)
+				kv.history = make(map[int64]int)
+				d.Decode(&kv.kvstore)
+				d.Decode(&kv.history)
+				kv.mu.Unlock()
+			} else {
 
-    go func() {
-        for {
-            _, isLeader := kv.rf.GetState()
-            kv.cond.L.Lock()
-            kv.isLeader = isLeader
-            kv.cond.L.Unlock()
-            kv.cond.Signal()
-            time.Sleep(Timeout)
-        }
-    }()
+				op := applyMsg.Command.(Op)
+
+				var machine int64
+				var req int
+				var key string
+				var entry DBEntry
+				index := applyMsg.Index
+
+				if op.Oprand == "Get" {
+					getArgs := op.Args.(GetArgs)
+					machine = getArgs.Cid
+					req = getArgs.Sid
+					key = getArgs.Key
+				} else {
+					putAppendArgs := op.Args.(PutAppendArgs)
+					machine = putAppendArgs.Cid
+					req = putAppendArgs.Sid
+				}
+
+				kv.mu.Lock()
+
+				if !kv.DuplicateReq(machine, req) {
+					kv.Apply(op)
+				}
+
+				entry.Command = op
+
+				if op.Oprand == "Get" {
+					v, exist := kv.kvstore[key]
+					entry.Value = v
+					entry.Exist = exist
+				}
+
+				_, exist := kv.result[index]
+
+				if !exist {
+					kv.result[index] = make(chan DBEntry, 1)
+				} else {
+					// clear the channel
+					select {
+					case <-kv.result[index]:
+					default:
+					}
+				}
+
+				kv.result[index] <- entry
+				kv.CheckSnapshot(applyMsg.Index)
+				kv.mu.Unlock()
+
+			}
+		}
+	}()
 
 	return kv
 }

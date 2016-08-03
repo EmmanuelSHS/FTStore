@@ -95,7 +95,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
                 return
             }
         }
-        time.Sleep(Wait)
+        //time.Sleep(Wait)
     }
 }
 

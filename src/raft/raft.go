@@ -470,6 +470,11 @@ func (rf *Raft) StartSnapshot(snapshot []byte, idx int) {
     d = append(d, snapshot...)
     rf.persister.SaveSnapshot(d)
 }
+
+func (rf *Raft) GetPersistSize() int {
+    return rf.persister.RaftStateSize()
+}
+
 //
 // send heartbeats for leader
 //
